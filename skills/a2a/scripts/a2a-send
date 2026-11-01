@@ -1,0 +1,126 @@
+#!/bin/sh
+# a2a-send — deliver one message into another participant's inbox.
+#
+# Part of the a2a skill. Licensed under the Apache License, Version 2.0;
+# see LICENSE-APACHE-2.0 in the repository root.
+#
+# The message is written under a dot name inside the recipient's inbox and
+# then linked to its final name in the same directory, so the recipient sees
+# it either complete or not at all. The script never creates a directory:
+# a missing inbox is an error, not something to repair.
+
+set -u
+LC_ALL=C
+export LC_ALL
+
+prog=a2a-send
+
+usage() {
+	cat >&2 <<'EOF'
+usage: a2a-send [-r IN-REPLY-TO] [-R REPLY-TO] INBOX FROM TO SUBJECT < BODY
+
+  INBOX        the recipient's inbox directory; it must already exist
+  FROM, TO     participant names, characters [a-z0-9-]
+  SUBJECT      one line of text
+  BODY         Markdown, read from standard input
+  -r FILE      file name of the message this one answers
+  -R DIR       absolute path of your own inbox (decentral variant)
+
+Prints the path of the delivered message. Exit status: 0 delivered,
+1 usage error, 2 inbox missing or not writable, 3 delivery failed.
+EOF
+	exit "${1:-1}"
+}
+
+fail() {
+	printf '%s: %s\n' "$prog" "$2" >&2
+	exit "$1"
+}
+
+in_reply_to=
+reply_to=
+while getopts 'r:R:h' opt; do
+	case $opt in
+	r) in_reply_to=$OPTARG ;;
+	R) reply_to=$OPTARG ;;
+	h) usage 0 ;;
+	*) usage ;;
+	esac
+done
+shift $((OPTIND - 1))
+[ $# -eq 4 ] || usage
+
+inbox=$1 from=$2 to=$3 subject=$4
+
+for name in "$from" "$to"; do
+	case $name in
+	'' | *[!a-z0-9-]*) fail 1 "invalid participant name '$name' (allowed: a-z 0-9 -)" ;;
+	esac
+done
+# Header fields are single lines without control characters, so nobody can
+# smuggle a second header line in.
+has_control() {
+	[ "$(printf '%s' "$1" | tr -d '\000-\037\177')" != "$1" ]
+}
+if [ -z "$subject" ] || has_control "$subject"; then
+	fail 1 'subject must be one non-empty line without control characters'
+fi
+case $in_reply_to in
+*/*) fail 1 'in-reply-to must be a bare file name' ;;
+esac
+has_control "$in_reply_to" && fail 1 'in-reply-to must be a bare file name'
+case $reply_to in
+'' | /*) ;;
+*) fail 1 'reply-to must be an absolute path' ;;
+esac
+has_control "$reply_to" && fail 1 'reply-to must be one line without control characters'
+
+[ -d "$inbox" ] || fail 2 "no inbox at $inbox"
+[ -w "$inbox" ] || fail 2 "inbox not writable: $inbox"
+
+# UTC to the millisecond. Where date cannot print fractions, use .000.
+stamp=$(date -u '+%Y-%m-%dT%H:%M:%S.%3NZ' 2>/dev/null)
+case $stamp in
+[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z) ;;
+*) stamp=$(date -u '+%Y-%m-%dT%H:%M:%S').000Z ;;
+esac
+file_stamp=$(printf '%s' "$stamp" | tr ':.' '--')
+
+# Subject to slug: lower case, [a-z0-9-], at most 40 characters.
+slug=$(printf '%s\n' "$subject" | tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz' | tr -c 'a-z0-9\n' '-' | tr -s '-' |
+	sed 's/^-//; s/-$//' | cut -c1-40 | sed 's/-$//')
+[ -n "$slug" ] || slug=message
+
+base="$file_stamp-$from-$slug"
+tmp="$inbox/.$base.$$.tmp"
+
+umask 077
+{
+	printf 'From: %s\nTo: %s\nDate: %s\nSubject: %s\n' "$from" "$to" "$stamp" "$subject"
+	[ -z "$in_reply_to" ] || printf 'In-Reply-To: %s\n' "$in_reply_to"
+	[ -z "$reply_to" ] || printf 'Reply-To: %s\n' "$reply_to"
+	printf '\n'
+	cat
+} >"$tmp" || {
+	rm -f "$tmp"
+	fail 3 "could not write into $inbox"
+}
+chmod 600 "$tmp" || {
+	rm -f "$tmp"
+	fail 3 "could not set mode 600 on the message"
+}
+
+# A hard link appears complete and never replaces an existing file, so a
+# name clash is detected instead of overwriting someone else's message.
+n=1
+final="$inbox/$base.md"
+while ! ln "$tmp" "$final" 2>/dev/null; do
+	if [ ! -e "$final" ] || [ "$n" -ge 100 ]; then
+		rm -f "$tmp"
+		fail 3 "could not deliver into $inbox"
+	fi
+	n=$((n + 1))
+	final="$inbox/$base-$n.md"
+done
+rm -f "$tmp"
+printf '%s\n' "$final"

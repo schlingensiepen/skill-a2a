@@ -1,0 +1,99 @@
+#!/bin/sh
+# a2a-watch — an example wake-up: wait until mail lies in an inbox.
+#
+# Part of the a2a skill. Licensed under the Apache License, Version 2.0;
+# see LICENSE-APACHE-2.0 in the repository root.
+#
+# Run it in the background. It ends as soon as a file without a leading dot
+# lies in one of the given inboxes, or when its own deadline has passed.
+# Its last line says which of the two happened, so an agent can tell
+# "deadline passed" from "the harness stopped me".
+
+set -u
+
+prog=a2a-watch
+
+usage() {
+	cat >&2 <<'EOF'
+usage: a2a-watch INBOX [INBOX...]
+
+Environment:
+  A2A_WATCH_MINUTES   deadline in minutes (default 60); keep it shorter
+                      than what your harness allows a background command
+  A2A_WATCH_SECONDS   deadline in seconds, overrides the minutes
+  A2A_WATCH_POLL      seconds between checks; with inotifywait the
+                      longest wait for one event (15)
+  A2A_WATCH_NO_INOTIFY  set to 1 to list instead of using inotifywait
+
+Last line: "a2a-watch: mail in INBOX" (one line per inbox with mail) or
+"a2a-watch: deadline passed after N s, no mail". Exit status: 0 mail,
+1 usage error, 2 inbox missing, 3 deadline passed.
+EOF
+	exit 1
+}
+
+number() {
+	case $2 in
+	'' | *[!0-9]*) printf '%s: %s must be a whole number\n' "$prog" "$1" >&2; exit 1 ;;
+	esac
+}
+
+[ $# -ge 1 ] || usage
+case $1 in -*) usage ;; esac
+
+minutes=${A2A_WATCH_MINUTES:-60}
+number A2A_WATCH_MINUTES "$minutes"
+seconds=${A2A_WATCH_SECONDS:-$((minutes * 60))}
+number A2A_WATCH_SECONDS "$seconds"
+poll=${A2A_WATCH_POLL:-15}
+number A2A_WATCH_POLL "$poll"
+[ "$poll" -gt 0 ] || poll=1
+
+for inbox in "$@"; do
+	[ -d "$inbox" ] || { printf '%s: no inbox at %s\n' "$prog" "$inbox" >&2; exit 2; }
+done
+
+use_inotify=no
+if [ "${A2A_WATCH_NO_INOTIFY:-0}" != 1 ] && command -v inotifywait >/dev/null 2>&1; then
+	use_inotify=yes
+fi
+
+# Prints every inbox that holds a message; a glob skips dot files.
+mail_in() {
+	found=1
+	for inbox in "$@"; do
+		for f in "$inbox"/*; do
+			if [ -f "$f" ]; then
+				printf '%s: mail in %s\n' "$prog" "$inbox"
+				found=0
+				break
+			fi
+		done
+	done
+	return $found
+}
+
+start=$(date +%s)
+end=$((start + seconds))
+while :; do
+	mail_in "$@" && exit 0
+	now=$(date +%s)
+	left=$((end - now))
+	if [ "$left" -le 0 ]; then
+		printf '%s: deadline passed after %s s, no mail\n' "$prog" "$((now - start))"
+		exit 3
+	fi
+	[ "$poll" -lt "$left" ] && wait_for=$poll || wait_for=$left
+	if [ "$use_inotify" = yes ]; then
+		# Mail that arrives between the check above and the moment the
+		# watches are set raises no event, so never wait longer than one
+		# poll interval. Dot files are deliveries in progress, not mail.
+		# Exit 0 is an event, 2 a timeout; anything else is an error.
+		inotifywait -qq -t "$wait_for" --exclude '/\.[^/]*$' \
+			-e create -e moved_to -e close_write "$@" >/dev/null 2>&1
+		rc=$?
+		[ "$rc" -eq 0 ] || [ "$rc" -eq 2 ] || sleep "$wait_for"
+	else
+		sleep "$wait_for"
+	fi
+done

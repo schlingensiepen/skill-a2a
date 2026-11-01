@@ -39,6 +39,9 @@ and `scripts/`. Copy it as a whole, so the scripts stay next to the text.
   for example by naming its absolute path in the instruction file your
   harness reads at start.
 
+To update an installed copy, remove the old directory first; otherwise
+`cp -R` puts the new one inside it as `a2a/a2a`.
+
 Then make the scripts executable and note their absolute path; the skill
 calls them by it:
 
@@ -58,8 +61,8 @@ sh tests/run-tests.sh
 ```
 
 It ends with `… passed, 0 failed`. The scripts need a POSIX shell and
-the usual tools (`date`, `tr`, `sed`, `ln`, `find`, `mktemp`);
-`inotifywait` is optional.
+the usual tools (`date`, `tr`, `sed`, `cut`, `ln`, `sleep`);
+`inotifywait` is optional. The tests also use `find` and `mktemp`.
 
 ## 4. Use it
 
